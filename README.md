@@ -1,2 +1,2 @@
 # gps-trilateration-test
-Trying to learn how GPS trilateraion works
+Trying to learn how GPS trilateration works
