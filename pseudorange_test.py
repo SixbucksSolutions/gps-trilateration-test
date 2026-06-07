@@ -1,6 +1,10 @@
+import argparse
+
 import numpy
 import numpy.typing
+import pymap3d
 import scipy.optimize
+
 
 # ==========================================
 # STEP 1: Speed of Light Constant
@@ -8,26 +12,81 @@ import scipy.optimize
 # Crucial for converting the 4th dimension (meters) back into time (seconds).
 SPEED_OF_LIGHT: float = 299_792_458.0
 
+
+
+def _parse_args() -> argparse.Namespace:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(description="Trilateration demo for GPS")
+    parser.add_argument("local_clock_offset_seconds", type=float,
+        help="Local clock offset from GPS time in seconds (-1.5 .. +1.5)")
+    return parser.parse_args()
+
+
+def _determine_measured_pseudoranges(args: argparse.Namespace,
+                                     hidden_actual_receiver_ecef_pos: numpy.typing.NDArray,
+                                     satellite_positions: numpy.typing.NDArray) -> numpy.typing.NDArray:
+
+    clock_bias_seconds: float = args.local_clock_offset_seconds
+
+    if not -1.5 <= clock_bias_seconds <= 1.5:
+        raise ValueError(f"Clock bias must be between -1.5 and +1.5 seconds to let least squares find a solution")
+
+    print()
+    print(f"    Clock bias (seconds) : {clock_bias_seconds:21,.06f} s")
+    clock_bias_meters: float = clock_bias_seconds * SPEED_OF_LIGHT
+    print(f"    Clock bias (meters)  : {clock_bias_meters:21,.06f} m")
+
+    # 3. Compute vector differences (subtract receiver position from each satellite)
+    delta_vectors: numpy.typing.NDArray = satellite_positions - hidden_actual_receiver_ecef_pos
+
+    # 4. Compute true geometric range (L2 Euclidean norm along the row axis)
+    geometric_ranges: numpy.typing.NDArray = numpy.linalg.norm(delta_vectors, axis=1)
+
+    # 5. Add receiver clock bias in meters to get pseudoranges
+    raw_measured_pseudoranges: numpy.typing.NDArray = geometric_ranges + clock_bias_meters
+
+    return raw_measured_pseudoranges
+
+
+args: argparse.Namespace = _parse_args()
+
+# Our ECEF position
+#       (***ZIP 22102, not known at calculation time, provided to compute pseudorange to actually
+#       resolve this position! ***)
+
+hidden_actual_receiver_ecef_pos: numpy.typing.NDArray = numpy.array(
+    [
+         1_098_443.219,
+        -4_845_862.187,
+         3_985_726.416,
+    ]
+)
+
+
 # ==========================================
 # STEP 2: Input Data Provided by the Satellites
 # ==========================================
-# 3D ECEF positions of 4 visible GPS satellites (units: meters)
+# 3D ECEF positions of 4 GPS satellites all visible from 22102 at 2026-06-01 00:00:00Z (units: meters)
 # These represent known coordinates extracted from the satellite ephemeris data.
-satellite_positions: numpy.typing.NDArray = numpy.array([
-    [ 15_600_000.0,  16_500_000.0,  15_200_000.0],  # Sat 1
-    [ 22_300_000.0,  -2_300_000.0,  13_800_000.0],  # Sat 2
-    [  1_900_000.0, -21_500_000.0,  15_700_000.0],  # Sat 3
-    [ 16_200_000.0, -13_200_000.0, -17_200_000.0]   # Sat 4
-])
+satellite_positions: numpy.typing.NDArray = numpy.array(
+    [
+        [ 12_450_000.000, -18_340_000.000,  16_120_000.000],  # PRN 02
+        [ -8_420_000.000, -22_110_000.000,  11_430_000.000],  # PRN 07
+        [  5_120_000.000, -24_150_000.000,  -8_210_000.000],  # PRN 13
+        [ 15_430_000.000, -11_240_000.000, -17_210_000.000]   # PRN 19
+    ]
+)
 
-# Raw pseudoranges measured by the receiver hardware (units: meters).
-# These numbers are inherently corrupted by the unknown receiver clock bias.
-measured_pseudoranges: numpy.typing.NDArray = numpy.array([
-    23_549_221.73,  # Distance to Sat 1 + (c * bias)
-    21_503_378.13,  # Distance to Sat 2 + (c * bias)
-    20_531_644.02,  # Distance to Sat 3 + (c * bias)
-    24_467_005.10   # Distance to Sat 4 + (c * bias)
-])
+measured_pseudoranges: numpy.typing.NDArray = _determine_measured_pseudoranges(args,
+                                                                               hidden_actual_receiver_ecef_pos,
+                                                                               satellite_positions)
+
+print()
+print(f"Raw pseudoranges with unknown local clock bias included:")
+print(f"-------------------------------------------------------")
+print(f"\tPRN 02: {measured_pseudoranges[0]:18,.03f} m")
+print(f"\tPRN 07: {measured_pseudoranges[1]:18,.03f} m")
+print(f"\tPRN 13: {measured_pseudoranges[2]:18,.03f} m")
+print(f"\tPRN 19: {measured_pseudoranges[3]:18,.03f} m")
 
 
 # ==========================================
@@ -79,20 +138,31 @@ estimated_state = solver_output.x
 computed_pos: numpy.typing.NDArray = estimated_state[0:3]
 computed_bias_seconds: float = estimated_state[3] / SPEED_OF_LIGHT
 
+lat, lon, alt = pymap3d.ecef2geodetic(computed_pos[0], computed_pos[1], computed_pos[2])
+
 # ==========================================
 # STEP 5: Print Final Output Metrics
 # ==========================================
-print("==================================================")
+print()
 print("             GPS PVT ENGINE OUTPUT                ")
 print("==================================================")
+print()
 print(f"Computed Receiver Position (ECEF Meters):")
-print(f"  X: {computed_pos[0]:14,.02f}")
-print(f"  Y: {computed_pos[1]:14,.02f}")
-print(f"  Z: {computed_pos[2]:14,.02f}")
+print(f"    X: {computed_pos[0]:14,.03f}")
+print(f"    Y: {computed_pos[1]:14,.03f}")
+print(f"    Z: {computed_pos[2]:14,.03f}")
+print()
+print(f"Computed Receiver Position (WGS84 lat/lon/alt):")
+print(f"  Lat: {lat:9.04f} degrees")
+print(f"  Lon: {lon:9.04f} degrees")
+print(f"  Alt: {alt:7,.02f} m")
+print()
 print("--------------------------------------------------")
+print()
 print(f"Computed Receiver Clock Offset:")
-print(f"  In Meters:  {estimated_state[3]:14,.02f} m")
-print(f"  In Seconds:          {computed_bias_seconds:9,.06f} s")
+print(f"   In Meters : {estimated_state[3]:19,.06f} m")
+print(f"  In Seconds :           {computed_bias_seconds:9,.06f} s")
+print()
 print("==================================================")
 print(f"Optimizer Success Status: {solver_output.success}")
 print(f"Final Residual Cost:      {solver_output.cost:.4e}")
