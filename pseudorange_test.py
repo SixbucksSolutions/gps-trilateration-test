@@ -12,7 +12,7 @@ import scipy.optimize
 # STEP 1: Speed of Light Constant
 # ==========================================
 # Crucial for converting the 4th dimension (meters) back into time (seconds).
-SPEED_OF_LIGHT: float = 299_792_458.0
+_SPEED_OF_LIGHT: float = 299_792_458.0
 
 _number_least_squares_iterations: int = 0
 
@@ -30,7 +30,7 @@ def _determine_measured_pseudoranges(args: argparse.Namespace,
                                      satellite_positions: numpy.typing.NDArray) -> numpy.typing.NDArray:
 
     clock_bias_seconds: float = args.receiver_clock_bias
-    clock_bias_meters: float = clock_bias_seconds * SPEED_OF_LIGHT
+    clock_bias_meters: float = clock_bias_seconds * _SPEED_OF_LIGHT
 
     if not -0.001 <= clock_bias_seconds <= 0.001:
         raise ValueError(f"Clock bias must be between -0.001 and +0.001 seconds to let least squares find a solution")
@@ -84,28 +84,7 @@ def _determine_measured_pseudoranges(args: argparse.Namespace,
     return raw_measured_pseudoranges
 
 
-args: argparse.Namespace = _parse_args()
 
-# ==========================================
-# STEP 2: Input Data Provided by the Satellites
-# ==========================================
-# 3D ECEF positions of 4 GPS satellites all visible from 22102 at 2026-06-01 00:00:00Z (units: meters)
-# These represent known coordinates extracted from the satellite ephemeris data.
-satellite_positions: numpy.typing.NDArray = numpy.array(
-    [
-        [ 12_450_000.000, -18_340_000.000,  16_120_000.000],  # PRN 02
-        [ -8_420_000.000, -22_110_000.000,  11_430_000.000],  # PRN 07
-        [  5_120_000.000, -24_150_000.000,  -8_210_000.000],  # PRN 13
-        [ 15_430_000.000, -11_240_000.000, -17_210_000.000]   # PRN 19
-    ]
-)
-
-measured_pseudoranges: numpy.typing.NDArray = _determine_measured_pseudoranges(args,
-                                                                               satellite_positions)
-
-# ==========================================
-# STEP 3: Define the Mathematical Residuals
-# ==========================================
 def gps_residuals(
         state_guess: numpy.typing.NDArray,
         sat_pos: numpy.typing.NDArray,
@@ -138,73 +117,93 @@ def gps_residuals(
 
     return residuals
 
-print()
-print()
-print(f"Four equations with four unknowns passed to least squares algorithm")
 
-for sat_num in range(len(satellite_positions)):
-    print(f"\n\t{measured_pseudoranges[sat_num]:14,.03f} = sqrt( "
-          f"({satellite_positions[sat_num][0]:15,.03f} - receiver_x)**2 + \n"
-          f"\t                       ({satellite_positions[sat_num][1]:15,.03f} - receiver_y)**2 + \n"
-          f"\t                       ({satellite_positions[sat_num][2]:15,.03f} - receiver_z)**2\n"
-          f"\t                     ) + receiver_clock_bias_distance")
+def _main() -> None:
+    args: argparse.Namespace = _parse_args()
 
+    # ==========================================
+    # STEP 2: Input Data Provided by the Satellites
+    # ==========================================
+    # 3D ECEF positions of 4 GPS satellites all visible from 22102 at 2026-06-01 00:00:00Z (units: meters)
+    # These represent known coordinates extracted from the satellite ephemeris data.
+    satellite_positions: numpy.typing.NDArray = numpy.array(
+        [
+            [ 12_450_000.000, -18_340_000.000,  16_120_000.000],  # PRN 02
+            [ -8_420_000.000, -22_110_000.000,  11_430_000.000],  # PRN 07
+            [  5_120_000.000, -24_150_000.000,  -8_210_000.000],  # PRN 13
+            [ 15_430_000.000, -11_240_000.000, -17_210_000.000]   # PRN 19
+        ]
+    )
 
+    measured_pseudoranges: numpy.typing.NDArray = _determine_measured_pseudoranges(args,
+                                                                                   satellite_positions)
 
-# ==========================================
-# STEP 4: Execution from Absolute Zero
-# ==========================================
-# The cold start: we assume the receiver is at the exact center of the Earth
-# with a perfectly synchronized clock. No hidden data is referenced.
-cold_start_guess: numpy.typing.NDArray = numpy.array([0.0, 0.0, 0.0, 0.0])
+    print()
+    print()
+    print(f"Four equations with four unknowns we are going to ask least squares to find a solution to ")
 
-print("\n\nRunning equation solver (least squares, Levenberg-Marquardt algorithm)")
-print("\n\tAlgorithm inputs provided:")
-print("\t\t- Cold start position guess (ECEF = (0.0, 0.0, 0.0))")
-print("\t\t- Cold start receiver clock bias estimate (0.0 meters)")
-print("\t\t- Exact ECEF positions of four satellites used in fix from GPS ephemeris")
-print("\t\t- Four measured pseudoranges to the four satellites in meters")
+    for sat_num in range(len(satellite_positions)):
+        print(f"\n\t{measured_pseudoranges[sat_num]:14,.03f} = sqrt( "
+              f"({satellite_positions[sat_num][0]:15,.03f} - receiver_x)**2 + \n"
+              f"\t                       ({satellite_positions[sat_num][1]:15,.03f} - receiver_y)**2 + \n"
+              f"\t                       ({satellite_positions[sat_num][2]:15,.03f} - receiver_z)**2\n"
+              f"\t                     ) + receiver_clock_bias_distance")
 
-# Solve the non-linear system of equations
-start_time: float = time.perf_counter()
-solver_output = scipy.optimize.least_squares(
-    gps_residuals,
-    cold_start_guess,
-    args=(satellite_positions, measured_pseudoranges),
-    method="lm" # Levenberg-Marquardt algorithm is ideal for tracking/least-squares
-)
-end_time: float = time.perf_counter()
-print()
-print("\tLeast squares iterations")
-print(f"\t\t    Number of iterations : {_number_least_squares_iterations:,}")
-print(f"\t\t              Clock time : {end_time - start_time:5.03f} s")
+    # The cold start: we assume the receiver is at the exact center of the Earth
+    # with a perfectly synchronized clock. No hidden data is referenced.
+    cold_start_guess: numpy.typing.NDArray = numpy.array([0.0, 0.0, 0.0, 0.0])
 
-print()
-print("\tLeast squares output")
-print(f"\t\tOptimizer Success Status : {solver_output.success}")
-print(f"\t\t     Final Residual Cost : {solver_output.cost:.4e}")
+    print("\n\nRunning equation solver (least squares, Levenberg-Marquardt algorithm)")
+    print("\n\tAlgorithm inputs provided:")
+    print("\t\t- Cold start position guess (ECEF = (0.0, 0.0, 0.0))")
+    print("\t\t- Cold start receiver clock bias estimate (0.0 meters)")
+    print("\t\t- Exact ECEF positions of four satellites used in fix from GPS ephemeris")
+    print("\t\t- Four measured pseudoranges to the four satellites in meters")
 
 
-estimated_state = solver_output.x
-computed_pos: numpy.typing.NDArray = estimated_state[0:3]
-computed_bias_seconds: float = estimated_state[3] / SPEED_OF_LIGHT
+    # Solve the non-linear system of equations
+    start_time: float = time.perf_counter()
+    solver_output = scipy.optimize.least_squares(
+        gps_residuals,
+        cold_start_guess,
+        args=(satellite_positions, measured_pseudoranges),
+        method="lm" # Levenberg-Marquardt algorithm is ideal for tracking/least-squares
+    )
+    end_time: float = time.perf_counter()
+    print()
+    print("\tLeast squares iterations")
+    print(f"\t\t    Number of iterations : {_number_least_squares_iterations:,}")
+    print(f"\t\t              Clock time : {end_time - start_time:5.03f} s")
 
-lat, lon, alt = pymap3d.ecef2geodetic(computed_pos[0], computed_pos[1], computed_pos[2])
+    print()
+    print("\tLeast squares output")
+    print(f"\t\tOptimizer Success Status : {solver_output.success}")
+    print(f"\t\t     Final Residual Cost : {solver_output.cost:.4e}")
 
-print()
-print()
-print(f"Estimated Receiver Position & Clock Bias")
-print(f"\n\tPosition")
-print(f"\n\t\tECEF")
-print(f"\t\t\t     X :  {computed_pos[0]:14,.03f} m")
-print(f"\t\t\t     Y :  {computed_pos[1]:14,.03f} m")
-print(f"\t\t\t     Z :  {computed_pos[2]:14,.03f} m")
-print()
-print(f"\t\tWGS84")
-print(f"\t\t\t   Lat : {lat:9.04f} degrees")
-print(f"\t\t\t   Lon : {lon:9.04f} degrees")
-print(f"\t\t\t   Alt :  {alt:5,.01f} m")
-print()
-print(f"\tTime")
-print(f"\n\t\tReceiver clock offset/bias: {computed_bias_seconds:.06f} s")
-print()
+    estimated_state = solver_output.x
+    computed_pos: numpy.typing.NDArray = estimated_state[0:3]
+    computed_bias_seconds: float = estimated_state[3] / _SPEED_OF_LIGHT
+
+    lat, lon, alt = pymap3d.ecef2geodetic(computed_pos[0], computed_pos[1], computed_pos[2])
+
+    print()
+    print()
+    print(f"Estimated Receiver Position & Clock Bias")
+    print(f"\n\tPosition")
+    print(f"\n\t\tECEF")
+    print(f"\t\t\t     X :  {computed_pos[0]:14,.03f} m")
+    print(f"\t\t\t     Y :  {computed_pos[1]:14,.03f} m")
+    print(f"\t\t\t     Z :  {computed_pos[2]:14,.03f} m")
+    print()
+    print(f"\t\tWGS84")
+    print(f"\t\t\t   Lat : {lat:9.04f} degrees")
+    print(f"\t\t\t   Lon : {lon:9.04f} degrees")
+    print(f"\t\t\t   Alt :  {alt:5,.01f} m")
+    print()
+    print(f"\tTime")
+    print(f"\n\t\tReceiver clock offset/bias: {computed_bias_seconds:.06f} s")
+    print()
+
+
+if __name__ == "__main__":
+    _main()
