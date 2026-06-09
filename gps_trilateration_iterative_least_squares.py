@@ -178,8 +178,8 @@ def _main() -> None:
 
     print()
     print()
-    print(f"Fix error (cumulative)")
-    print(f"\n\t             Position : {fix_error_position_meters:5.1f} m")
+    print(f"Error in First Fix")
+    print(f"\n\t          3D Position : {fix_error_position_meters:5.1f} m")
     print(  f"\tReceiver clock offset : {fix_error_receiver_clock_offset_seconds:13.09f} s")
 
     print()
