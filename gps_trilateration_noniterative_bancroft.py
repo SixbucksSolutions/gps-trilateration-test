@@ -1,16 +1,15 @@
 import argparse
+import json
 import random
 import time
+import typing
 
 import numpy
 import numpy.typing
 import pymap3d
-import scipy.optimize
+
 
 import trilateration_setup
-
-
-_number_least_squares_iterations: int = 0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -30,37 +29,100 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def gps_residuals(
-        state_guess: numpy.typing.NDArray,
-        sat_pos: numpy.typing.NDArray,
-        pseudoranges: numpy.typing.NDArray) -> numpy.typing.NDArray:
-
-    # print(f"\t\tEntering least squares iteration with state guess {state_guess}")
-
-    global _number_least_squares_iterations
-
-    _number_least_squares_iterations += 1
-
+def _bancroft_trilateration(sat_positions: numpy.typing.NDArray,
+                            pseudoranges: numpy.typing.NDArray) -> tuple[numpy.typing.NDArray, float]:
     """
-    Calculates how well our current guess fits the raw physics equations.
-    Goal of the optimizer is to drive all 4 output values as close to 0 as possible.
+    Performs non-iterative GPS trilateration cleanly using Bancroft's Algorithm.
+
+    Parameters:
+    sat_positions (numpy.ndarray): Nx3 array of satellite coordinates (X, Y, Z).
+    pseudoranges (numpy.ndarray): Nx1 (or 1D array of length N) of pseudoranges.
+
+    Returns:
+    numpy.ndarray: 3-element array of receiver coordinates (X, Y, Z).
+    float: Receiver clock bias (in meters).
     """
-    # state_guess contains 4 elements: [X, Y, Z, clock_bias_in_meters]
-    estimated_pos = state_guess[0:3]
-    estimated_bias_meters = state_guess[3]
+    # Ensure proper array shapes
+    A = numpy.atleast_2d(sat_positions)
+    r = numpy.atleast_2d(pseudoranges).reshape(-1, 1)
+    n = A.shape[0]
 
-    residuals: numpy.typing.NDArray = numpy.zeros(4)
-    for i in range(4):
-        # 1. Compute true geometric range for the current guess
-        calculated_dist = numpy.linalg.norm(sat_pos[i] - estimated_pos)
+    if n < 4:
+        raise ValueError("At least 4 satellites are required for GPS trilateration.")
 
-        # 2. Add the guessed clock bias (converted to meters)
-        modeled_pseudorange = calculated_dist + estimated_bias_meters
+    # Step 1: Compute Lorentz constant 'alpha' for each satellite row
+    # alpha_i = 0.5 * (x_i^2 + y_i^2 + z_i^2 - r_i^2)
+    alpha = 0.5 * (numpy.sum(A ** 2, axis=1, keepdims=True) - r ** 2)
 
-        # 3. Compute the discrepancy (residual) against actual data
-        residuals[i] = modeled_pseudorange - pseudoranges[i]
+    # Step 2: Construct Matrix B (CRITICAL: Pseudoranges must be NEGATIVE)
+    B = numpy.hstack((A, -r))
+    B_pinv = numpy.linalg.pinv(B)
 
-    return residuals
+    # Step 3: Compute standard components g1 and g2
+    ones = numpy.ones((n, 1))
+    g1 = B_pinv @ alpha
+    g2 = B_pinv @ ones
+
+    # Step 4: Define the Minkowski Lorentz Matrix M = diag(1, 1, 1, -1)
+    M = numpy.diag([1.0, 1.0, 1.0, -1.0])
+
+    def lorentz_dot(u, v):
+        # Explicit matrix multiply and extraction to handle NumPy 1.25+ scalar rules
+        return float((u.T @ M @ v).item())
+
+    # Step 5: Compute correct quadratic formula coefficients
+    a = lorentz_dot(g2, g2)
+    b = 2 * (lorentz_dot(g1, g2) - 1.0)
+    c = lorentz_dot(g1, g1)
+
+    # Solve the quadratic formula for lambda
+    discriminant = b ** 2 - 4 * a * c
+    if discriminant < 0:
+        raise ValueError("No physical solution found (negative discriminant). Check inputs.")
+
+    sqrt_disc = numpy.sqrt(discriminant)
+    lambda1 = (-b + sqrt_disc) / (2 * a)
+    lambda2 = (-b - sqrt_disc) / (2 * a)
+
+    # Step 6: Compute the two possible physical 4-vector solutions
+    y1 = g1 + lambda1 * g2
+    y2 = g1 + lambda2 * g2
+
+    # Extract positions
+    pos1 = y1[:3, 0]
+    pos2 = y2[:3, 0]
+
+    # Earth radius approximation (~6,371,000 meters)
+    r_earth = 6_371_000.0
+
+    solutions: list[dict[str, float | numpy.typing.NDArray]] = [
+        {
+            "distance_from_surface" : abs(float(numpy.linalg.norm(pos1)) - r_earth),
+            "ecef_pos"              : pos1,
+            "clock_bias_meters"     : -y1[3, 0],
+        },
+
+        {
+            "distance_from_surface" : abs(float(numpy.linalg.norm(pos2)) - r_earth),
+            "ecef_pos"              : pos2,
+            "clock_bias_meters"     : -y2[3, 0],
+        },
+    ]
+
+    # print(json.dumps(solutions, indent=4, sort_keys=True, default=str))
+
+    if solutions[0]["distance_from_surface"] < solutions[1]["distance_from_surface"]:
+        selected_solution: int = 0
+    else:
+        selected_solution: int = 1
+
+    return typing.cast(
+        tuple[numpy.typing.NDArray, float],
+        (
+            solutions[selected_solution]["ecef_pos"],
+            solutions[selected_solution]["clock_bias_meters"]
+        )
+    )
 
 
 def _main() -> None:
@@ -75,7 +137,6 @@ def _main() -> None:
     measured_pseudoranges: numpy.typing.NDArray = trilateration_setup.satellite_pseudoranges(
         args.receiver_clock_bias, satellite_positions, args.ionosphere_delay_seconds,
         args.troposphere_delay_seconds)
-
 
     print()
     print(f"Receiver-measured pseudoranges")
@@ -107,51 +168,17 @@ def _main() -> None:
           "\ttransmission delay for each bird, this is actually a legit simulation, not a totally\n"
           "\tfaked-out demo.")
 
-    print()
-    print()
-    print(f"Four equations with four unknowns being passed to the equation solver")
-
-    for sat_num in range(len(satellite_positions)):
-        print(f"\n\t{measured_pseudoranges[sat_num]:14,.03f} = sqrt( "
-              f"({satellite_positions[sat_num][0]:15,.03f} - receiver_x)**2 + \n"
-              f"\t                       ({satellite_positions[sat_num][1]:15,.03f} - receiver_y)**2 + \n"
-              f"\t                       ({satellite_positions[sat_num][2]:15,.03f} - receiver_z)**2\n"
-              f"\t                     ) + receiver_clock_bias_distance")
-
-    # The cold start: we assume the receiver is at the exact center of the Earth
-    # with a perfectly synchronized clock. No hidden data is referenced.
-    cold_start_guess: numpy.typing.NDArray = numpy.array([0.0, 0.0, 0.0, 0.0])
-
-    print("\n\nRunning equation solver (iterative least squares, Levenberg-Marquardt algorithm)")
+    print("\n\n")
+    print("Running Bancroft non-iterative/closed trilateration algorithm")
     print("\n\tAlgorithm inputs provided:")
-    print("\t\t- Cold start position guess (ECEF = (0.0, 0.0, 0.0))")
-    print("\t\t- Cold start receiver clock bias estimate (0.0 meters)")
     print("\t\t- Exact ECEF positions of four satellites used in fix from GPS ephemeris")
     print("\t\t- Four measured pseudoranges to the four satellites in meters")
 
-    # Solve the non-linear system of equations
     start_time: float = time.perf_counter()
-    solver_output = scipy.optimize.least_squares(
-        gps_residuals,
-        cold_start_guess,
-        args=(satellite_positions, measured_pseudoranges),
-        method="lm" # Levenberg-Marquardt algorithm is ideal for tracking/least-squares
-    )
+    computed_pos, computed_bias_meters = _bancroft_trilateration(satellite_positions, measured_pseudoranges)
+    computed_bias_seconds: float = computed_bias_meters / trilateration_setup.SPEED_OF_LIGHT_M_PER_S
     end_time: float = time.perf_counter()
-
-    print()
-    print("\tLeast squares iterations")
-    print(f"\t\t    Number of iterations : {_number_least_squares_iterations:,}")
-    print(f"\t\t              Clock time : {end_time - start_time:5.03f} s")
-
-    print()
-    print("\tLeast squares output")
-    print(f"\t\tOptimizer Success Status : {solver_output.success}")
-    print(f"\t\t     Final Residual Cost : {solver_output.cost:.4e}")
-
-    estimated_state = solver_output.x
-    computed_pos: numpy.typing.NDArray = estimated_state[0:3]
-    computed_bias_seconds: float = estimated_state[3] / trilateration_setup.SPEED_OF_LIGHT_M_PER_S
+    print(f"\n\tClock time: {end_time - start_time:.06f} s")
 
     lat, lon, alt = pymap3d.ecef2geodetic(computed_pos[0], computed_pos[1], computed_pos[2])
 

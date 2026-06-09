@@ -1,6 +1,7 @@
 import random
 
 import numpy
+import numpy.linalg
 import numpy.typing
 
 
