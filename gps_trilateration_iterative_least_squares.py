@@ -7,12 +7,8 @@ import numpy.typing
 import pymap3d
 import scipy.optimize
 
+import trilateration_setup
 
-# ==========================================
-# STEP 1: Speed of Light Constant
-# ==========================================
-# Crucial for converting the 4th dimension (meters) back into time (seconds).
-_SPEED_OF_LIGHT: float = 299_792_458.0
 
 _number_least_squares_iterations: int = 0
 
@@ -23,66 +19,15 @@ def _parse_args() -> argparse.Namespace:
                         # Random distance bias of -300,000 .. +300,000 m
                         default=(random.random() * 0.002) - 0.001,
                         help="Local clock offset from GPS time in seconds (-0.001 .. +0.001) (default: random)")
+    parser.add_argument("-i", "--ionosphere-delay-seconds", type=float,
+                        help="Fixed ionospheric propagation delay (typical: 0.0000000007 - 0.000001600 s / "
+                             "0.7 - 1,600 ns)"
+                             "(default: random per satellite)")
+    parser.add_argument("-t", "--troposphere-delay-seconds", type=float,
+                        help="Fixed tropospheric propagation delay (typical: 0.000000008 - 0.000000100 s / "
+                             "8 - 100 ns)"
+                             "(default: random per satellite)")
     return parser.parse_args()
-
-
-def _determine_measured_pseudoranges(args: argparse.Namespace,
-                                     satellite_positions: numpy.typing.NDArray) -> numpy.typing.NDArray:
-
-    clock_bias_seconds: float = args.receiver_clock_bias
-    clock_bias_meters: float = clock_bias_seconds * _SPEED_OF_LIGHT
-
-    if not -0.001 <= clock_bias_seconds <= 0.001:
-        raise ValueError(f"Clock bias must be between -0.001 and +0.001 seconds to let least squares find a solution")
-
-    print()
-    print("Simulated fix using GPS satellites visible from Fairfax County, VA, USA at 2026-06-01 00:00 UTC")
-    print()
-
-    # This is only used to compute initial pseudorange, need to calculate actual signal propagation delay
-    #       It is obfuscated by the clock bias so least squares needs to actually solve the equation
-    hidden_actual_receiver_ecef_pos: numpy.typing.NDArray = numpy.array(
-        [
-             1_088_598.0,
-            -4_853_018.0,
-             3_979_796.0
-        ]
-    )
-
-    # 3. Compute vector differences (subtract cold start receiver position from each satellite)
-    delta_vectors: numpy.typing.NDArray = satellite_positions - hidden_actual_receiver_ecef_pos
-
-    # 4. Compute true geometric range (L2 Euclidean norm along the row axis)
-    geometric_ranges: numpy.typing.NDArray = numpy.linalg.norm(delta_vectors, axis=1)
-
-    # 5. Add receiver clock bias in meters to produce obfuscated pseudoranges
-    raw_measured_pseudoranges: numpy.typing.NDArray = geometric_ranges + clock_bias_meters
-
-    print()
-    print(f"Receiver-measured pseudoranges")
-    print()
-    print(f"\tPRN  Pseudorange (m)  Actual range (m)   Local Clock Bias (m)")
-    print(f"\t---  ---------------  ----------------   --------------------")
-    print(f"\t 02  {raw_measured_pseudoranges[0]:15,.03f}  "
-          f"({geometric_ranges[0]:15,.03f} + {clock_bias_meters:19,.03f})")
-    print(f"\t 07  {raw_measured_pseudoranges[1]:15,.03f}  "
-          f"({geometric_ranges[1]:15,.03f} + {clock_bias_meters:19,.03f})")
-    print(f"\t 13  {raw_measured_pseudoranges[2]:15,.03f}  "
-          f"({geometric_ranges[2]:15,.03f} + {clock_bias_meters:19,.03f})")
-    print(f"\t 19  {raw_measured_pseudoranges[3]:15,.03f}  "
-          f"({geometric_ranges[3]:15,.03f} + {clock_bias_meters:19,.03f})")
-    print()
-
-    print("\tThese pseudoranges are initialized to the *actual* distance between the receiver and\n"
-          "\tposition of each bird (provided by the highly accurate GPS ephemeris data the receiver\n"
-          "\twould have downloaded before being able to attempt trilateration) plus clock bias.\n"
-          "\n"
-          "\tNote that this is realistic situation -- the pseudoranges from actual receivers show the\n"
-          "\ttransmission delay for each bird, this is actually a legit simulation, not a totally\n"
-          "\tfaked-out demo.")
-
-    return raw_measured_pseudoranges
-
 
 
 def gps_residuals(
@@ -121,26 +66,37 @@ def gps_residuals(
 def _main() -> None:
     args: argparse.Namespace = _parse_args()
 
-    # ==========================================
-    # STEP 2: Input Data Provided by the Satellites
-    # ==========================================
-    # 3D ECEF positions of 4 GPS satellites all visible from 22102 at 2026-06-01 00:00:00Z (units: meters)
-    # These represent known coordinates extracted from the satellite ephemeris data.
-    satellite_positions: numpy.typing.NDArray = numpy.array(
-        [
-            [ 12_450_000.000, -18_340_000.000,  16_120_000.000],  # PRN 02
-            [ -8_420_000.000, -22_110_000.000,  11_430_000.000],  # PRN 07
-            [  5_120_000.000, -24_150_000.000,  -8_210_000.000],  # PRN 13
-            [ 15_430_000.000, -11_240_000.000, -17_210_000.000]   # PRN 19
-        ]
-    )
+    print()
+    print("Simulated fix using GPS satellites visible from Fairfax County, VA, USA at 2026-06-01 00:00 UTC")
+    print()
 
-    measured_pseudoranges: numpy.typing.NDArray = _determine_measured_pseudoranges(args,
-                                                                                   satellite_positions)
+    satellite_positions: numpy.typing.NDArray = trilateration_setup.satellite_ecef_positions()
+
+    measured_pseudoranges: numpy.typing.NDArray = trilateration_setup.satellite_pseudoranges(
+        args.receiver_clock_bias, satellite_positions, args.ionosphere_delay_seconds,
+        args.troposphere_delay_seconds)
+
+    print()
+    print(f"Receiver-measured pseudoranges")
+    print()
+    print(f"\tPRN  Pseudorange (m)")
+    print(f"\t---  ---------------")
+    for i in range(len(measured_pseudoranges)):
+        print(f"\t {trilateration_setup.satellite_prn_numbers[i]}  {measured_pseudoranges[i]:15,.03f}")
+    print()
+
+    print("\tThese pseudoranges are initialized to the *actual* distance between the receiver and\n"
+          "\tposition of each bird (provided by the highly accurate GPS ephemeris data the receiver\n"
+          "\twould have downloaded before being able to attempt trilateration) obfuscated by clock bias\n"
+          "\tand atmospheric propagation delays.\n"
+          "\n"
+          "\tNote that this is realistic situation -- the pseudoranges from actual receivers show the\n"
+          "\ttransmission delay for each bird, this is actually a legit simulation, not a totally\n"
+          "\tfaked-out demo.")
 
     print()
     print()
-    print(f"Four equations with four unknowns we are going to ask least squares to find a solution to ")
+    print(f"Four equations with four unknowns being passed to the equation solver")
 
     for sat_num in range(len(satellite_positions)):
         print(f"\n\t{measured_pseudoranges[sat_num]:14,.03f} = sqrt( "
@@ -153,13 +109,12 @@ def _main() -> None:
     # with a perfectly synchronized clock. No hidden data is referenced.
     cold_start_guess: numpy.typing.NDArray = numpy.array([0.0, 0.0, 0.0, 0.0])
 
-    print("\n\nRunning equation solver (least squares, Levenberg-Marquardt algorithm)")
+    print("\n\nRunning equation solver (iterative least squares, Levenberg-Marquardt algorithm)")
     print("\n\tAlgorithm inputs provided:")
     print("\t\t- Cold start position guess (ECEF = (0.0, 0.0, 0.0))")
     print("\t\t- Cold start receiver clock bias estimate (0.0 meters)")
     print("\t\t- Exact ECEF positions of four satellites used in fix from GPS ephemeris")
     print("\t\t- Four measured pseudoranges to the four satellites in meters")
-
 
     # Solve the non-linear system of equations
     start_time: float = time.perf_counter()
@@ -170,6 +125,7 @@ def _main() -> None:
         method="lm" # Levenberg-Marquardt algorithm is ideal for tracking/least-squares
     )
     end_time: float = time.perf_counter()
+
     print()
     print("\tLeast squares iterations")
     print(f"\t\t    Number of iterations : {_number_least_squares_iterations:,}")
@@ -182,7 +138,7 @@ def _main() -> None:
 
     estimated_state = solver_output.x
     computed_pos: numpy.typing.NDArray = estimated_state[0:3]
-    computed_bias_seconds: float = estimated_state[3] / _SPEED_OF_LIGHT
+    computed_bias_seconds: float = estimated_state[3] / trilateration_setup.SPEED_OF_LIGHT_M_PER_S
 
     lat, lon, alt = pymap3d.ecef2geodetic(computed_pos[0], computed_pos[1], computed_pos[2])
 
