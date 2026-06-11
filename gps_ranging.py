@@ -33,6 +33,8 @@ MIN_VALID_PSEUDORANGE: dict[str, float] = {
     "seconds" : (20_200_000 - 13_007) / SPEED_OF_LIGHT_M_PER_S,
 }
 
+MICROSECONDS_PER_SECOND: int = 1_000_000
+
 _hidden_pseudoranges: dict[int, float] = {}
 
 simulation_start_gps_time_at_receiver: datetime.datetime = datetime.datetime.fromisoformat(
@@ -148,18 +150,8 @@ def _pseudorange_by_received_prn_stream_bits(args: argparse.Namespace,
 def _lnav_data_bit_sync_offset(args: argparse.Namespace, prn_num: int, sim_prn_start_offset: float) -> None:
     global simulation_current_gps_time_at_receiver
 
-    sim_relative_time: float = (simulation_current_gps_time_at_receiver -
-                                simulation_start_gps_time_at_receiver).total_seconds()
+    _logger.debug(f"Starting function to establish LNAV data bit sync")
 
-    print(f"\t\t\tSim time when receiver starts trying to find bit sync with PRN {prn_num:02} : "
-          f"{sim_relative_time:.06f} s")
-
-    sim_relative_time += sim_prn_start_offset
-
-    print(f"\t\t\tSim time of first opportunity to test for bit sync with PRN {prn_num:02d}    : "
-          f"{sim_relative_time:.06f} s")
-
-    # Get the pseudorange computed earlier for this satellite
     satellite_pseudorange_meters: float = _hidden_pseudoranges[prn_num]
 
     # Find out where we are in the bitstream based on full transmission delay
@@ -167,75 +159,69 @@ def _lnav_data_bit_sync_offset(args: argparse.Namespace, prn_num: int, sim_prn_s
 
     transmission_delay_offset_chips: int = math.ceil( (1_023 * 1_000) * full_over_the_air_transmission_delay_seconds)
 
-    _logger.debug(f"Receiver is reading data sent by PRN {prn_num:02d} {transmission_delay_offset_chips:,} chips / "
-                  f"{full_over_the_air_transmission_delay_seconds:.06f} seconds ago")
-
     # Shift that to GPS satellite time reference
-    satellite_transmission_time = simulation_current_gps_time_at_receiver - datetime.timedelta(
+    sat_abs_time: datetime.datetime = simulation_current_gps_time_at_receiver - datetime.timedelta(
         seconds=full_over_the_air_transmission_delay_seconds)
 
-    _logger.debug(f"Simulated time at GPS receiver: {simulation_current_gps_time_at_receiver.isoformat(
-        timespec="microseconds")} (GPS time)")
+    sim_relative_time: float = (simulation_current_gps_time_at_receiver -
+                                simulation_start_gps_time_at_receiver).total_seconds()
 
-    _logger.debug(f"Time at GPS satellite when bits were sent: {satellite_transmission_time.isoformat(
-        timespec="microseconds")} (GPS time)")
+    _logger.debug(f"Sim absolute time: {simulation_current_gps_time_at_receiver.isoformat(sep=" ", 
+                                                                                        timespec="microseconds")}")
+    _logger.debug(f"Sim relative time: {sim_relative_time:.06f} s")
 
-    # Next bit transition will be on next 0.020s boundary (50 bits per second, starting at 0.000, last is 0.980)
-    satellite_milliseconds: int  = satellite_transmission_time.microsecond // 1000
-    # _logger.debug(f"Current satellite millisecond: {satellite_milliseconds}")
-    milliseconds_to_next_lnav_data_bit_transition: int = 20 - (satellite_milliseconds % 20)
-    next_lnav_data_bit: datetime.datetime = satellite_transmission_time + datetime.timedelta(
-        milliseconds=milliseconds_to_next_lnav_data_bit_transition)
+    _logger.debug(f"Sat absolute time: {sat_abs_time.isoformat(sep=" ", timespec="microseconds")}")
 
-    _logger.debug(f"*Satellite* time of next LNAV data bit transition: "
-                  f"{next_lnav_data_bit.isoformat(timespec="microseconds")} (GPS time)")
-    delay_to_next_lnav_bit: float = (next_lnav_data_bit - satellite_transmission_time).total_seconds()
+    # Compute sat delta to next 20ms interval (when LNAV bits start)
+    current_second_us: int = (sat_abs_time.minute * 60 * 1_000_000) + (sat_abs_time.second * 1_000_000) + \
+                                    sat_abs_time.microsecond
 
-    # NO NO NO NO NO
-    _logger.debug(f"*Satellite* time until next LNAV data bit transition: "
-                  f"{delay_to_next_lnav_bit} s")
+    # Calculate microseconds needed to reach the next 20ms interval
+    interval_us: int = 20_000
+    remainder_us: int = current_second_us % interval_us
+    difference_us: int = interval_us - remainder_us
+
+    # Advance all sim times in lockstep
+    clock_step: datetime.timedelta = datetime.timedelta(microseconds=difference_us)
+    fractional_second_clock_step: float = float(clock_step.microseconds) / MICROSECONDS_PER_SECOND
+    _logger.info(f"Advancing all simulation times by {fractional_second_clock_step:.06f} s "
+                   f"to get to next sat LNAV bit boundary time of {(sat_abs_time + clock_step).isoformat(
+                       sep=" ", timespec="microseconds")} (GPS)")
+
+    sat_abs_time += clock_step
+    sim_relative_time += fractional_second_clock_step
+    simulation_current_gps_time_at_receiver += clock_step
+
+
+    _logger.debug(f"Sim absolute time: {simulation_current_gps_time_at_receiver.isoformat(sep=" ", 
+                                                                                        timespec="microseconds")}")
+    _logger.debug(f"Sim relative time: {sim_relative_time:.06f} s")
+    _logger.debug(f"Sat absolute time: {sat_abs_time.isoformat(sep=" ", timespec="microseconds")}")
 
     simulated_number_of_lnav_data_bits_until_edge_seen: int = random.randint(0, 3)
-    _logger.debug(f"Simulating that it takes {simulated_number_of_lnav_data_bits_until_edge_seen} "
-                   "LNAV data bits until we see an edge")
 
-    # Fast forward sim time to point the first LNAV bit start, even if it doesn't have an edge we can latch on
-    sim_relative_time += delay_to_next_lnav_bit
-    print(f"\t\t\tSim time of first LNAV message start                              : "
-          f"{sim_relative_time:.06f} s")
+    if simulated_number_of_lnav_data_bits_until_edge_seen > 0:
+        _logger.debug(f"Simulating that it takes {simulated_number_of_lnav_data_bits_until_edge_seen} "
+                      "LNAV data bits until we see a (0 <-> 1) transition")
+        clock_step: datetime.timedelta = datetime.timedelta(
+            milliseconds=simulated_number_of_lnav_data_bits_until_edge_seen * 20)
+        fractional_second_clock_step = float(clock_step.microseconds) / MICROSECONDS_PER_SECOND
+        _logger.info(f"Advancing all simulation times by {fractional_second_clock_step:.06f} s to "
+                     f"{(sat_abs_time + clock_step).isoformat(sep=" ", timespec="microseconds")} (GPS) "
+                      "where the first LNAV message bit transition edge occurs")
 
-    satellite_transmission_time += datetime.timedelta(seconds=delay_to_next_lnav_bit)
+        sat_abs_time += clock_step
+        sim_relative_time += fractional_second_clock_step
+        simulation_current_gps_time_at_receiver += clock_step
 
-    print(f"\t\t\tSat time of first LNAV message start                              : "
-          f"{satellite_transmission_time.isoformat(sep=" ", timespec="microseconds")} GPS")
 
-    time_offset_from_first_edge_check_to_first_data_bit_transition_seconds: float = \
-        (0.02 * simulated_number_of_lnav_data_bits_until_edge_seen)
+        _logger.debug(f"Sim absolute time: {simulation_current_gps_time_at_receiver.isoformat(sep=" ", 
+                                                                                            timespec="microseconds")}")
+        _logger.debug(f"Sim relative time: {sim_relative_time:.06f} s")
+        _logger.debug(f"Sat absolute time: {sat_abs_time.isoformat(sep=" ", timespec="microseconds")}")
 
-    # Number of signal samples on PRN code boundaries before we saw a data bit edge
-    # _logger.debug(f"Millis to next bit: {milliseconds_to_next_lnav_data_bit_transition}")
-    number_checks_for_data_bit_edge: int = milliseconds_to_next_lnav_data_bit_transition + (
-        20 * simulated_number_of_lnav_data_bits_until_edge_seen)
-
-    _logger.debug(f"Receiver sniffed at C/A period boundaries {number_checks_for_data_bit_edge} times "
-                   "until the first data bit start seen")
-
-    simulation_current_gps_time_at_receiver += datetime.timedelta(
-        seconds=time_offset_from_first_edge_check_to_first_data_bit_transition_seconds)
-
-    sim_relative_time += time_offset_from_first_edge_check_to_first_data_bit_transition_seconds
-
-    print(f"\t\t\tSim time when bit sync was established with PRN {prn_num:02d}                : "
-          f"{sim_relative_time:.06f} s")
-
-    simulation_current_gps_time_at_receiver = simulation_start_gps_time_at_receiver + datetime.timedelta(
-        seconds=sim_relative_time)
-
-    satellite_transmission_time += datetime.timedelta(
-        seconds=time_offset_from_first_edge_check_to_first_data_bit_transition_seconds)
-
-    print(f"\t\t\tSat time when bit sync was established with PRN {prn_num:02d}                : "
-          f"{satellite_transmission_time.isoformat(sep=" ", timespec="microseconds")} s")
+    else:
+        _logger.debug(f"PRNG gave us a bit transition the first time we checked, no need to keep looking")
 
 
 def _get_sim_time_offsets_lnav_bit_starts() -> list[float]:
@@ -257,13 +243,14 @@ def _get_sim_time_offsets_lnav_bit_starts() -> list[float]:
 
 def _read_time_of_week(args: argparse.Namespace, prn_num: int) -> datetime.datetime:
     global simulation_current_gps_time_at_receiver
+    _logger.info("Starting search for time of week")
 
     sim_relative_time: float = (simulation_current_gps_time_at_receiver -
                                 simulation_start_gps_time_at_receiver).total_seconds()
 
-    print(f"\t\t\tSim time at start of Time of Week (TOW) search : {sim_relative_time:.06f} s")
+    _logger.debug(f"Sim time at entry               : {sim_relative_time:.06f} s")
 
-    print(f"\t\t\tReceiver absolute time: {simulation_current_gps_time_at_receiver.isoformat(
+    _logger.debug(f"Receiver absolute time at entry : {simulation_current_gps_time_at_receiver.isoformat(
         sep=" ", timespec="microseconds")} (GPS)")
 
     satellite_pseudorange_meters: float = _hidden_pseudoranges[prn_num]
@@ -275,7 +262,7 @@ def _read_time_of_week(args: argparse.Namespace, prn_num: int) -> datetime.datet
     sat_gps_time: datetime.datetime = simulation_current_gps_time_at_receiver - datetime.timedelta(
         seconds=full_over_the_air_transmission_delay_seconds)
 
-    print(f"\t\t\tSatellite time: {sat_gps_time.isoformat(sep=" ", timespec="microseconds")} (GPS)")
+    _logger.debug(f"Satellite time at entry         : {sat_gps_time.isoformat(sep=" ", timespec="microseconds")} (GPS)")
 
 
 
