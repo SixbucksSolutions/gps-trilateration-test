@@ -264,7 +264,64 @@ def _read_time_of_week(args: argparse.Namespace, prn_num: int) -> datetime.datet
 
     _logger.debug(f"Satellite time at entry         : {sat_gps_time.isoformat(sep=" ", timespec="microseconds")} (GPS)")
 
+    print("\t\t\tThe LNAV preamble is sent on a six second interval"
+          "\n\t\t\tThe edge of the first bit of LNAV preamble is sent *exactly* at the GPS second boundary from sat"
+          "\n\t\t\t\tframe of reference")
 
+    # That means the next preamble starts at the next six-second interval
+
+    # Calculate microseconds needed to reach the next six-second interval
+    current_second_us: int = (sat_gps_time.minute * 60 * 1_000_000) + (sat_gps_time.second * 1_000_000) + \
+                                    sat_gps_time.microsecond
+    interval_us: int = 6_000_000
+    remainder_us: int = current_second_us % interval_us
+    difference_us: int = interval_us - remainder_us
+
+    # Advance all sim times in lockstep
+    clock_step: datetime.timedelta = datetime.timedelta(microseconds=difference_us)
+    fractional_second_clock_step: float = float(clock_step.microseconds) / MICROSECONDS_PER_SECOND
+    _logger.info(f"Advancing all simulation times by {clock_step.seconds + fractional_second_clock_step:.06f} s "
+                   f"to get to next LNAV preamble bit boundary time of {(sat_gps_time + clock_step).isoformat(
+                       sep=" ", timespec="microseconds")} (GPS)")
+
+    sat_gps_time += clock_step
+    sim_relative_time += clock_step.seconds + fractional_second_clock_step
+    simulation_current_gps_time_at_receiver += clock_step
+
+    _logger.debug(f"Sim absolute time: {simulation_current_gps_time_at_receiver.isoformat(sep=" ",
+                                                                                          timespec="microseconds")}")
+    _logger.debug(f"Sim relative time: {sim_relative_time:.06f} s")
+    _logger.debug(f"Sat absolute time: {sat_gps_time.isoformat(sep=" ", timespec="microseconds")}")
+
+    print( "\t\t\tNext preamble found at: "
+          f"\n\t\t\t\tSim time "
+          f"{simulation_current_gps_time_at_receiver.isoformat(sep=" ", timespec="microseconds")} GPS"
+          f"\n\t\t\t\tSat time "
+          f"{sat_gps_time.isoformat(sep=" ", timespec="microseconds")} GPS")
+
+    ### HOLY DOGSHIT WUT WAIT WUT JESUS CHRIST
+
+    """
+        Preamble found at: 
+		    Sim time 2026-06-01 00:00:06.071414 GPS
+	
+	    Okay. Doesn't seem exciting
+	    
+	    UNTIL you realize 0.71414 is the actual satellite pseudorange in seconds
+	    
+	    DEBUG:gps_ranging:SVN 02 pseudorange: 21,409,507.60 m = 21,409,453.33 (actual) +  
+	        50.96 (ionospheric) +  3.30 (tropospheric)
+	        
+	    21,409,507.6 / speed of light is 0.71414 seconds
+	    
+	    Once we read out the preawmble and then back calculate to the time of the start of the preamble,
+	        that gives us 6.071414 seconds
+	        
+	    Take the fractional second out of the preamble and somehow we have a pseudorange
+	    
+	    This is black magic of the highest sort
+	"""
+	    
 
 def _main() -> None:
     global simulation_current_gps_time_at_receiver
