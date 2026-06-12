@@ -167,10 +167,19 @@ def _establish_bit_sync(args: argparse.Namespace, sim_engine: sim_time.SimTime,
     # Calculate microseconds needed to reach the next 20ms interval
     interval_us: int = 20_000
     remainder_us: int = current_second_us % interval_us
-    delay_to_next_bit_start: datetime.timedelta = datetime.timedelta(microseconds=interval_us - remainder_us)
+    delay_to_next_bit_transition_edge: datetime.timedelta = datetime.timedelta(
+        microseconds=interval_us - remainder_us)
 
-    # Advance sim time to start of next bit
-    sim_engine.advance_sim_time(delay_to_next_bit_start)
+    number_data_bits_until_edge_seen: int
+    if (number_data_bits_until_edge_seen := random.randint(0, 3)) > 0:
+        delay_to_next_bit_transition_edge += datetime.timedelta(seconds=0.020 * number_data_bits_until_edge_seen)
+
+    # Advance sim time to first data bit transition edge we see in this sim run
+    _logger.info(
+        f"Bit sync: advancing clock {sim_time.SimTime.timedelta_isoformat(delay_to_next_bit_transition_edge)} s "
+         "as it's when bit sync is established (receiver sees its first (0 <-> 1) transition edge at a data bit boundary"
+    )
+    sim_engine.advance_sim_time(delay_to_next_bit_transition_edge)
 
     raise NotImplementedError("Stop")
 
