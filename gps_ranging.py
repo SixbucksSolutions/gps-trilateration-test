@@ -35,6 +35,9 @@ MIN_VALID_PSEUDORANGE: dict[str, float] = {
 
 MICROSECONDS_PER_SECOND: int = 1_000_000
 
+SECONDS_PER_LNAV_DATA_BIT: float = 0.020
+BITS_PER_LNAV_WORD: int = 30
+
 _hidden_pseudoranges: dict[int, float] = {}
 
 
@@ -201,69 +204,131 @@ def _establish_bit_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
               "receiver_time_absolute_gps").time_elapsed())} s")
 
 
+def _get_tow_in_gps_seconds(time_instant_in_gps_time_reference: datetime.datetime) -> int:
+    # Find days passed since the most recent Sunday
+    # (.weekday() returns Mon=0, Tue=1 ... Sat=5, Sun=6)
+    days_since_sunday = (time_instant_in_gps_time_reference.weekday() + 1) % 7
 
-def _establish_subframe_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
+    # Create datetime of last Sunday at 00:00:00.000000 GPS time
+    last_sunday_midnight = time_instant_in_gps_time_reference.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - datetime.timedelta(days=days_since_sunday)
+
+    # Get the Time Of Week (TOW) which is time difference in whole seconds
+    time_of_week: datetime.timedelta = time_instant_in_gps_time_reference - last_sunday_midnight
+
+    if time_of_week.microseconds != 0:
+        raise ValueError("Can only compute TOW for time instants on exact second boundaries")
+
+    return int(time_of_week.total_seconds())
+
+
+def _establish_subframe_sync(sim_engine: sim_time.SimTime, prn_num: int) -> int:
+    """
+    Simulate the receiver establishing subframe sync between the receiver and the SV with the specified PRN.
+
+    :param sim_engine:
+    :param prn_num:
+    :return: the exact *GPS* time of week (in seconds) *at the sim's SV GPS time reference*
+    """
+
     _logger.debug(f"Starting subframe sync with SV with PRN {prn_num:02d}")
+
+    # Receiver relative time when bit sync starts
+    sync_operation_start: datetime.timedelta = sim_engine.user_clock("receiver_time_absolute_gps").time_elapsed()
+
 
     print("\t\t\tUsing 20 ms timer created during bit sync to know when each bit will start, allowing the receiver to"
           "\n\t\t\t\tsave power, only listening at the exact 20 ms intervals when bits hit our receiver antenna")
     print("\t\t\tListening to the nav message bit stream for the first time it sees the fixed LNAV preamble bits")
 
-    raise NotImplementedError("Halt or I shall say halt a _second time_!")
 
-    # That means the next preamble starts at the next six-second interval
+    # Compute *SV* reference frame time delta to next 6-second interval (subframe starts)
+    sv_clock: sim_time.SimTime.UserClock = sim_engine.user_clock("prn02_absolute_gps")
+    sv_abs_time: datetime.datetime = sv_clock.time_current()
 
-    # Calculate microseconds needed to reach the next six-second interval
-    current_second_us: int = (sat_gps_time.minute * 60 * 1_000_000) + (sat_gps_time.second * 1_000_000) + \
-                                    sat_gps_time.microsecond
-    interval_us: int = 6_000_000
-    remainder_us: int = current_second_us % interval_us
-    difference_us: int = interval_us - remainder_us
+    # Calculate delta needed to reach the next six-second interval
+    interval_s: int = 6
+    absolute_s = sv_abs_time.second + interval_s - (sv_abs_time.second % interval_s)
 
-    # Advance all sim times in lockstep
-    clock_step: datetime.timedelta = datetime.timedelta(microseconds=difference_us)
-    fractional_second_clock_step: float = float(clock_step.microseconds) / MICROSECONDS_PER_SECOND
-    _logger.info(f"Advancing all simulation times by {clock_step.seconds + fractional_second_clock_step:.06f} s "
-                   f"to get to next LNAV preamble bit boundary time of {(sat_gps_time + clock_step).isoformat(
-                       sep=" ", timespec="microseconds")} (GPS)")
+    # Update seconds and zero out microseconds -- subframes start on exact second boundaries *in SV time reference*
+    gps_time_of_next_subframe_start = sv_abs_time.replace(second=absolute_s, microsecond=0)
 
-    sat_gps_time += clock_step
-    sim_relative_time += clock_step.seconds + fractional_second_clock_step
-    simulation_current_gps_time_at_receiver += clock_step
+    _logger.debug(f"Current SV time: {sv_abs_time.isoformat(sep=" ", timespec="milliseconds")} GPS")
+    _logger.debug( "SV time when next subframe will be sent: "
+                  f"{gps_time_of_next_subframe_start.isoformat(sep=" ", timespec="milliseconds")} GPS")
 
-    _logger.debug(f"Sim absolute time: {simulation_current_gps_time_at_receiver.isoformat(sep=" ",
-                                                                                          timespec="microseconds")}")
-    _logger.debug(f"Sim relative time: {sim_relative_time:.06f} s")
-    _logger.debug(f"Sat absolute time: {sat_gps_time.isoformat(sep=" ", timespec="microseconds")}")
+    bit_reading_duration_to_start_of_next_subframe: datetime.timedelta = gps_time_of_next_subframe_start - sv_abs_time
 
-    print( "\t\t\tNext preamble found at: "
-          f"\n\t\t\t\tSim time "
-          f"{simulation_current_gps_time_at_receiver.isoformat(sep=" ", timespec="microseconds")} GPS"
-          f"\n\t\t\t\tSat time "
-          f"{sat_gps_time.isoformat(sep=" ", timespec="microseconds")} GPS")
+    _logger.info( "Advancing clock "
+                 f"{bit_reading_duration_to_start_of_next_subframe.seconds}."
+                 f"{bit_reading_duration_to_start_of_next_subframe.microseconds:06d} s to next subframe start" )
+    sim_engine.advance_sim_time(bit_reading_duration_to_start_of_next_subframe)
 
-    ### HOLY DOGSHIT WUT WAIT WUT JESUS CHRIST
+    # We can compute the time of week for the current moment in time that would be stored in the TOW
+    #   field in the frame we're now starting to process
+    time_of_week_at_subframe_start: int = _get_tow_in_gps_seconds(sim_engine.user_clock(
+        "prn02_absolute_gps").time_current())
 
-    """
-        Preamble found at: 
-		    Sim time 2026-06-01 00:00:06.071414 GPS
-	
-	    Okay. Doesn't seem exciting
-	    
-	    UNTIL you realize 0.71414 is the actual satellite pseudorange in seconds
-	    
-	    DEBUG:gps_ranging:SVN 02 pseudorange: 21,409,507.60 m = 21,409,453.33 (actual) +  
-	        50.96 (ionospheric) +  3.30 (tropospheric)
-	        
-	    21,409,507.6 / speed of light is 0.71414 seconds
-	    
-	    Once we read out the preamble and then back calculate to the time of the start of the preamble,
-	        that gives us 6.071414 seconds
-	        
-	    Take the fractional second out of the preamble and somehow we have a pseudorange
-	    
-	    This is black magic of the highest sort
-	"""
+    _logger.debug( "Current GPS time of week at this exact moment: "
+                  f"{time_of_week_at_subframe_start // 6:,}.000000000 seconds")
+
+    # TOW value that will be contained in the subframe we're about to rip open is the subframe index (relative to
+    #   start of GPS week) of the SUBSEQUENT subframe
+    subframe_tow_payload: int = (time_of_week_at_subframe_start // 6) + 1
+
+    # Now need to wait to let receiver read LNAV preamble
+    bits_in_lnav_preamble: int = 8
+    duration_to_read_preamble: datetime.timedelta = datetime.timedelta(
+        seconds=SECONDS_PER_LNAV_DATA_BIT * bits_in_lnav_preamble)
+    _logger.info("Advancing clock "
+                 f"{sim_time.SimTime.timedelta_isoformat(duration_to_read_preamble)} s to read LNAV preamble")
+    sim_engine.advance_sim_time(duration_to_read_preamble)
+
+    # Read handover word, which includes time of week
+    duration_to_read_handover_word: datetime.timedelta = datetime.timedelta(
+        seconds=SECONDS_PER_LNAV_DATA_BIT * BITS_PER_LNAV_WORD)
+    _logger.info("Advancing clock "
+                 f"{sim_time.SimTime.timedelta_isoformat(duration_to_read_handover_word)} s to read handover word")
+    sim_engine.advance_sim_time(duration_to_read_handover_word)
+
+    # Would now have the time of week (six second subframe counter that resets every Sunday at midnight GPS)
+    _logger.info(f"Read GPS time of week from handover word, TOW value = {subframe_tow_payload:,}")
+    exact_gps_time_of_week_second_at_subframe_sync: int = subframe_tow_payload * 6
+
+    _logger.info( "TOW value signifies that the moment in time the first bit of the SUBSEQUENT subframe is received "
+                 f"is *exactly* {exact_gps_time_of_week_second_at_subframe_sync:,}.000000000 GPS seconds from "
+                  "the start of GPS week")
+
+    # Now read out remainder of this subframe, which is when subframe sync is established
+    sv_clock  = sim_engine.user_clock("prn02_absolute_gps")
+    sv_abs_time = sv_clock.time_current()
+    absolute_s = sv_abs_time.second + interval_s - (sv_abs_time.second % interval_s)
+
+    # Update seconds and zero out microseconds -- subframes start on exact second boundaries *in SV time reference*
+    gps_time_of_next_subframe_start = sv_abs_time.replace(second=absolute_s, microsecond=0)
+
+    _logger.debug(f"Current SV time: {sv_abs_time.isoformat(sep=" ", timespec="milliseconds")} GPS")
+    _logger.debug( "SV time when next subframe will be sent: "
+                  f"{gps_time_of_next_subframe_start.isoformat(sep=" ", timespec="milliseconds")} GPS")
+
+    bit_reading_duration_to_start_of_next_subframe: datetime.timedelta = gps_time_of_next_subframe_start - sv_abs_time
+
+    _logger.info( "Advancing clock "
+                 f"{bit_reading_duration_to_start_of_next_subframe.seconds}."
+                 f"{bit_reading_duration_to_start_of_next_subframe.microseconds:06d} s to next subframe start when "
+                  "the receiver hits subframe sync")
+    sim_engine.advance_sim_time(bit_reading_duration_to_start_of_next_subframe)
+
+    # Receiver relative time when sync is established
+    sync_operation_end: datetime.timedelta = sim_engine.user_clock("receiver_time_absolute_gps").time_elapsed()
+
+    cumulative_time_to_establish_sync: datetime.timedelta = sync_operation_end - sync_operation_start
+
+    print( "\t\t\tEstablishing subframe sync took "
+          f"{sim_time.SimTime.timedelta_isoformat(cumulative_time_to_establish_sync)} s")
+
+    return exact_gps_time_of_week_second_at_subframe_sync
 
 
 def _add_sat_clock_to_sim(sim_engine: sim_time.SimTime, prn_num: int) -> None:
@@ -362,17 +427,10 @@ def _main() -> None:
         # Now we have locked *both* PRN sync AND bit sync, we can start to watch bits to spot the subframe preamble
         print()
         print(f"\t\tStep 03: subframe sync (6 second period)")
-        _establish_subframe_sync(sim_engine, prn_num)
+        gps_time_of_week_seconds_at_sv: int = _establish_subframe_sync(sim_engine, prn_num)
 
-        raise NotImplementedError("Stop")
-
-
-        print()
-        print("\t\tReading Time Of Week (TOW) data")
-        svn_time_of_week = datetime.datetime = _read_time_of_week(args, svn_num)
-
-        print(f"\n\t\t*** Simulation *GPS* time at receiver: "
-              f"{simulation_current_gps_time_at_receiver.isoformat(sep=" ", timespec="microseconds")} ***")
+        print( "\t\t\tGPS time of week at our SV at this *exact moment*: "
+              f"{gps_time_of_week_seconds_at_sv:,}.000000000 seconds")
 
         print()
         print("\t\tCalculating pseudorange now that we have TOW + time since TOW + fractional offset")
