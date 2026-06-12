@@ -147,8 +147,13 @@ def _pseudorange_by_received_prn_stream_bits(args: argparse.Namespace,
 
 
 def _establish_bit_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
-
     _logger.debug(f"Starting to establish bit sync")
+
+    # Receiver relative time when bit sync starts
+    bit_sync_operation_start: datetime.timedelta = sim_engine.user_clock("receiver_time_absolute_gps").time_elapsed()
+
+    print("\t\t\tUsing 1 ms timer created during PRN sync to signal exact time to pop up and listen to the modulated"
+          "\n\t\t\t\tnav signal for a transition edge marking the ms when nav message bits start")
 
     satellite_pseudorange_meters: float = _hidden_pseudoranges[prn_num]
 
@@ -173,14 +178,25 @@ def _establish_bit_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
     if (number_data_bits_until_edge_seen := random.randint(0, 3)) > 0:
         delay_to_next_bit_transition_edge += datetime.timedelta(seconds=0.020 * number_data_bits_until_edge_seen)
 
-    # Advance sim time to first data bit transition edge we see in this sim run
+    # Advance sim time to first data bit transition edge we see in this sim run at which time we have
+    #   achieved bit sync
     _logger.info(
         f"Bit sync: advancing clock {sim_time.SimTime.timedelta_isoformat(delay_to_next_bit_transition_edge)} s "
          "as it's when bit sync is established (receiver sees its first (0 <-> 1) transition edge at a data bit boundary"
     )
     sim_engine.advance_sim_time(delay_to_next_bit_transition_edge)
 
-    print("\t\t\tReceiver's _relative_ time from cold start at the exact moment bit sync is established: "
+    # Receiver relative time when bit sync starts
+    bit_sync_operation_end: datetime.timedelta = sim_engine.user_clock("receiver_time_absolute_gps").time_elapsed()
+
+    cumulative_time_to_establish_bit_sync: datetime.timedelta = bit_sync_operation_end - bit_sync_operation_start
+
+    print( "\t\t\tEstablishing bit sync took "
+          f"{sim_time.SimTime.timedelta_isoformat(cumulative_time_to_establish_bit_sync)} s")
+
+    print("\t\t\tStarting 20 ms timer to signal when every new nav message bit first hits the receiver antenna")
+
+    print("\t\t\tTime from receiver cold start through established bit sync: "
           f"{sim_time.SimTime.timedelta_isoformat(sim_engine.user_clock(
               "receiver_time_absolute_gps").time_elapsed())} s")
 
@@ -189,11 +205,11 @@ def _establish_bit_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
 def _establish_subframe_sync(sim_engine: sim_time.SimTime, prn_num: int) -> None:
     _logger.debug(f"Starting subframe sync with SV with PRN {prn_num:02d}")
 
-    print("\t\t\tThe LNAV preamble is sent every six seconds"
-          "\n\t\t\tThe edge of the first bit of LNAV preamble is sent *exactly* on GPS second boundaries from sat"
-          "\n\t\t\t\tframe of reference")
+    print("\t\t\tUsing 20 ms timer created during bit sync to know when each bit will start, allowing the receiver to"
+          "\n\t\t\t\tsave power, only listening at the exact 20 ms intervals when bits hit our receiver antenna")
+    print("\t\t\tListening to the nav message bit stream for the first time it sees the fixed LNAV preamble bits")
 
-    raise NotImplementedError("Halt or I shall yell halt a second time!")
+    raise NotImplementedError("Halt or I shall say halt a _second time_!")
 
     # That means the next preamble starts at the next six-second interval
 
@@ -282,9 +298,10 @@ def _establish_prn_sync(args: argparse.Namespace, sim_engine: sim_time.SimTime, 
     _logger.info(f"Advancing time by {sim_prn_start_offset:.06f} s which is the exact moment PRN sync is established")
     sim_engine.advance_sim_time(sim_prn_start_offset)
 
-    print("\t\t\tReceiver's _relative_ time from cold start at moment PRN sync is established: "
+    print("\t\t\tEstablishing PRN sync took "
           f"{sim_time.SimTime.timedelta_isoformat(sim_engine.user_clock(
               "receiver_time_absolute_gps").time_elapsed())} s")
+    print("\t\t\tStarting 1 ms timer to signal each precise time the PRN Gold code for this SV restarts at the antenna")
 
     _logger.info(f"PRN sync successfully established for SV with PRN {prn_num:02d}")
     _logger.info(f"1 ms timer set which fires every time the antenna receives the start of a new PRN loop")
