@@ -10,7 +10,8 @@ class SimTime:
 
         def __init__(self: typing.Self,
                      clock_name: str,
-                     initial_clock: datetime.datetime | datetime.time) -> None:
+                     initial_clock: datetime.datetime | datetime.time,
+                     logging_level: int = logging.WARNING) -> None:
 
             self.clock_name: str = clock_name
             self.time_initial: datetime.datetime
@@ -26,6 +27,14 @@ class SimTime:
                 raise ValueError("Initial clock must be of type datetime.datetime or datetime.time")
 
             self.time_current: datetime.datetime = self.time_initial
+            self._logger = logging.getLogger(f"sim_time.{clock_name}")
+            self._logger.setLevel(logging_level)
+
+
+        def advance_clock(self: typing.Self, advance_amount) -> None:
+            self.time_current += advance_amount
+            self._logger.debug(f"Time advanced by {SimTime._timedelta_isoformat(advance_amount)} s, "
+                               f"now at {self.time_current.isoformat(sep=" ", timespec="microseconds")}")
 
 
     # No need to call this constructor on every advance time call, set it and forget it
@@ -33,7 +42,6 @@ class SimTime:
 
     # Class level logger
     _logger: logging.Logger = logging.getLogger("sim_time")
-    _logger.setLevel(logging.DEBUG)
 
 
     @classmethod
@@ -44,9 +52,10 @@ class SimTime:
         return f"{total_seconds}.{microseconds:06d}"
 
 
-    def __init__(self: typing.Self) -> None:
-        self._sim_relative_clock: datetime.time = datetime.time()
+    def __init__(self: typing.Self, logging_level: int = logging.WARNING) -> None:
+        self._sim_master_delta: datetime.timedelta = datetime.timedelta()
         self._user_clocks: dict[str, SimTime.UserClock] = {}
+        self._logger.setLevel(logging_level)
 
 
     def add_user_clock(self: typing.Self, user_clock: UserClock) -> None:
@@ -54,7 +63,7 @@ class SimTime:
             raise ValueError(f"Tried to add clock named {user_clock.clock_name} that was already added")
 
         self._user_clocks[user_clock.clock_name] = user_clock
-        SimTime._logger.info(f"Added user clock \"{user_clock.clock_name}\" at "
+        SimTime._logger.info(f"Added user clock \"{user_clock.clock_name}\" with initial value of "
                              f"{user_clock.time_current.isoformat(sep=" ", timespec="microseconds")}")
 
 
@@ -66,11 +75,11 @@ class SimTime:
             # No-op
             return
 
-        self._sim_relative_clock += time_delta
+        self._sim_master_delta += time_delta
 
         # Now add the delta to all individual clocks
         for curr_clock in self._user_clocks.values():
-            curr_clock.time_current += time_delta
+            curr_clock.advance_clock(time_delta)
 
         SimTime._logger.info(f"Advanced simulation time by {SimTime._timedelta_isoformat(time_delta)} s")
 
@@ -94,23 +103,34 @@ class SimTime:
 if __name__ == "__main__":
     logging.basicConfig()
 
-    sim_engine: SimTime = SimTime()
+    sim_engine: SimTime = SimTime(logging_level=logging.DEBUG)
+
     sim_engine.add_user_clock(
-        SimTime.UserClock("sim_time_relative", datetime.time())
+        SimTime.UserClock("sim_time_relative", datetime.time(), logging_level=logging.DEBUG)
     )
 
     receiver_time_absolute_gps: datetime.datetime = datetime.datetime.fromisoformat("2026-06-01T00:00:00.000000")
     sim_engine.add_user_clock(
-        SimTime.UserClock("receiver_time_absolute_gps", receiver_time_absolute_gps)
+        SimTime.UserClock("receiver_time_absolute_gps", receiver_time_absolute_gps,
+                          logging_level=logging.DEBUG)
     )
 
     sat_time_absolute_gps: datetime.datetime = receiver_time_absolute_gps - datetime.timedelta(seconds=0.071414)
     sim_engine.add_user_clock(
-        SimTime.UserClock("sat_time_absolute_gps", sat_time_absolute_gps)
+        SimTime.UserClock("sat_time_absolute_gps", sat_time_absolute_gps, logging_level=logging.DEBUG)
     )
 
+    print()
     print("Clocks at starting line:")
     retrieved_clocks: dict[str, datetime.datetime] = sim_engine.user_clocks()
 
     for curr_clock_name in sorted(retrieved_clocks):
-        print(f"{curr_clock_name}: {retrieved_clocks[curr_clock_name].isoformat(sep=" ", timespec="microseconds")}")
+        if "_relative" not in curr_clock_name:
+            print(f"\t{curr_clock_name:26} : "
+                  f"{retrieved_clocks[curr_clock_name].isoformat(sep=" ", timespec="microseconds")}")
+        else:
+            print(f"\t{curr_clock_name:26} :            "
+                  f"{retrieved_clocks[curr_clock_name].time().isoformat(timespec="microseconds")}")
+
+
+    sim_engine.advance_sim_time(datetime.timedelta(seconds=5.071414))
