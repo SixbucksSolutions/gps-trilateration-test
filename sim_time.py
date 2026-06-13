@@ -4,25 +4,34 @@ import typing
 
 
 def timedelta_str(time_delta: datetime.timedelta) -> str:
-    total_seconds: int = time_delta.seconds
-    microseconds: int = time_delta.microseconds
-
-    return f"{total_seconds}.{microseconds:06d}"
+    return f"{time_delta.total_seconds():.06f}"
 
 
 class SimTimer:
     def __init__(self: typing.Self,
                  timer_name: str,
+                 timer_rollover_microseconds: int | None = None,
                  logging_level: int = logging.WARNING) -> None:
 
         self.timer_name: str = timer_name
         self._time_elapsed: datetime.timedelta = datetime.timedelta()
-        self._logger = logging.getLogger(f"sim_time.timer.{timer_name}")
+        self._timer_rollover_microseconds: int | None = timer_rollover_microseconds
+        self._logger: logging.Logger = logging.getLogger(f"sim_time.timer.{timer_name}")
         self._logger.setLevel(logging_level)
 
 
     def advance_time(self: typing.Self, advance_amount: datetime.timedelta) -> None:
         self._time_elapsed += advance_amount
+
+        # Handle possible rollover
+        if self._timer_rollover_microseconds is not None:
+            timer_in_microseconds: int = int(self._time_elapsed.total_seconds() * 1_000_000)
+            timer_with_rollover: int = timer_in_microseconds % self._timer_rollover_microseconds
+
+            if timer_in_microseconds != timer_with_rollover:
+                self._logger.info("Time advance crossed rollover threshold")
+                self._time_elapsed = datetime.timedelta(microseconds=timer_with_rollover)
+
         self._logger.debug(f"Timer advanced by {timedelta_str(advance_amount)} s, "
                            f"now at {self._time_elapsed.total_seconds():.06f} s")
 
@@ -79,14 +88,15 @@ class SimTime:
     _logger: logging.Logger = logging.getLogger("sim_time")
 
 
-    @classmethod
-
-
     def __init__(self: typing.Self, logging_level: int = logging.WARNING) -> None:
         self._sim_timer: SimTimer = SimTimer("sim_master_time")
         self._user_clocks: dict[str, SimClock] = {}
         self._user_timers: dict[str, SimTimer] = {}
         self._logger.setLevel(logging_level)
+
+
+    def sim_master_time(self: typing.Self) -> datetime.time:
+        return self._sim_timer.value()
 
 
     def add_user_clock(self: typing.Self, user_clock: SimClock) -> None:
@@ -96,6 +106,7 @@ class SimTime:
         self._user_clocks[user_clock.clock_name] = user_clock
         SimTime._logger.info(f"Added user clock \"{user_clock.clock_name}\" with initial value of "
                              f"{user_clock.time_current().isoformat(sep=" ", timespec="microseconds")}")
+
 
     def add_user_timer(self: typing.Self, timer: SimTimer) -> None:
         if timer.timer_name in self._user_timers:
@@ -176,12 +187,6 @@ if __name__ == "__main__":
 
     sim_engine: SimTime = SimTime(
         # logging_level=logging.DEBUG
-    )
-
-    sim_engine.add_user_timer(
-        SimTimer("sim_time_relative"
-            # logging_level=logging.DEBUG
-        )
     )
 
     receiver_time_absolute_gps: datetime.datetime = datetime.datetime.fromisoformat("2026-06-01T00:00:01.000000")
