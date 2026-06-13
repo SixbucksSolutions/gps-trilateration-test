@@ -437,7 +437,7 @@ def _main() -> None:
                "tuple which gives it a way to estimate SV's GPS time based on delta from local clock" )
 
         print()
-        print("\t\tCalculating pseudorange now that we have TOW + time since TOW + sub-millisecond offset")
+        print("\t\tCalculating pseudorange now that we can set t(rx) = TOW seconds + bit counter + sub-ms offset")
         print("\t\t\tDone!")
 
         break
